@@ -1,0 +1,9 @@
+# Zig generated files
+.zig-cache
+zig-out
+
+# Environnement files
+.env
+
+# User specific files
+.DS_Store
