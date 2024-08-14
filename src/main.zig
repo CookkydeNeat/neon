@@ -2,47 +2,7 @@ const std = @import("std");
 const endianness = @import("builtin").target.cpu.arch.endian();
 const net = std.net;
 const print = std.debug.print;
-
-const ParserError = error{ MissingData, InvalidData };
-
-/// Experimental VarInt implementation
-///
-/// See [the wiki](https://wiki.vg/Protocol#VarInt_and_VarLong) for more informations
-const VarInt = struct {
-    value: i32,
-    length: usize,
-
-    const zero = VarInt{ .value = 0, .length = 1 };
-
-    pub fn fromBytes(bytes: []u8) ParserError!VarInt {
-        const VarIntLength = 5;
-        var result: i32 = 0;
-        var position: u5 = 0;
-        var index: usize = 0;
-        while (true) : (index += 1) {
-            if (index >= VarIntLength) {
-                // VarInt should not be longer than 5 bytes
-                return ParserError.InvalidData;
-            }
-
-            if (index >= bytes.len) {
-                // No more data but last byte still had the MSB set
-                return ParserError.MissingData;
-            }
-
-            const byte = bytes[index];
-            const segment: i32 = (@as(i32, byte) & 0x7F) << position;
-            result |= segment;
-            position += 7;
-
-            // Break if MSB is not set
-            if (byte & 0x80 == 0) {
-                break;
-            }
-        }
-        return VarInt{ .value = result, .length = index + 1 };
-    }
-};
+const types = @import("net/types.zig");
 
 /// Experimental Position implementation
 ///
@@ -96,45 +56,17 @@ const Position = packed struct {
     }
 };
 
-/// Debug function
-pub fn printStructAsBytes(comptime T: type, instance: T) void {
-    const byteSlice: [*]const u8 = @ptrCast(&instance);
-
-    const aa = byteSlice[0..@sizeOf(T)];
-    for (aa) |byte| {
-        std.debug.print("{b:0>8}", .{byte});
-    }
-    std.debug.print("\n", .{});
-}
-
 /// Imagine having to implement the String type
 const String = struct {
-    len: VarInt,
+    len: types.VarInt,
     data: []u8,
 
-    pub fn fromBytes(bytes: []u8) ParserError!String {
-        const length = try VarInt.fromBytes(bytes);
+    pub fn fromBytes(bytes: []u8) types.ParserError!String {
+        const length = try types.VarInt.fromBytes(bytes);
         const data = bytes[length.length..];
         return String{ .len = length, .data = data };
     }
 };
-
-// The following code is not even working I was testing things
-const Handshake = struct { protocol_version: VarInt, server_address: String, server_port: u16, next_state: VarInt };
-
-pub fn readType(comptime T: type, data: []u8) ParserError!T {
-    _ = data; // compilation fix, fuk u compiler I do what I want
-}
-
-// Hell nah
-pub fn readPacket(comptime T: type, data: []u8) ParserError!T {
-    inline for (std.meta.fields(T)) |field| {
-        const inst = field.type.fromBytes(data);
-        print("{}\n", .{inst});
-    }
-    data[0] = 1;
-    return ParserError.InvalidData;
-}
 
 pub fn main() !void {
     // This code reads the first packet sent by a client
@@ -160,9 +92,8 @@ pub fn main() !void {
     const message = try client.stream.reader().readAllAlloc(allocator, 1024);
     defer allocator.free(message);
 
-    const one = VarInt.fromBytes(message) catch VarInt.zero;
-    const two = VarInt.fromBytes(message[one.length..]) catch VarInt.zero;
-    _ = try readPacket(Handshake, message[one.length + two.length ..]);
+    const one = types.VarInt.fromBytes(message) catch types.VarInt.zero;
+    const two = types.VarInt.fromBytes(message[one.length..]) catch types.VarInt.zero;
 
     print("{} Send packet with id {x}\n", .{ client.address, two.value });
 }
