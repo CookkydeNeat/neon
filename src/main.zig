@@ -1,60 +1,7 @@
 const std = @import("std");
-const endianness = @import("builtin").target.cpu.arch.endian();
 const net = std.net;
 const print = std.debug.print;
 const types = @import("net/types.zig");
-
-/// Experimental Position implementation
-///
-/// See [the wiki](https://wiki.vg/Protocol#Position) for more informations
-const Position = packed struct {
-    x: i26,
-    z: i26,
-    y: i12,
-
-    pub fn fromRaw(number: u64) Position {
-        const position: Endian_Position() = @bitCast(number);
-        return Position{ .x = position.x, .z = position.z, .y = position.y };
-    }
-
-    pub fn fromBytes(bytes: [8]u8) Position {
-        return Position.fromRaw(@bitCast(bytes));
-    }
-
-    pub fn intoBytes(self: Position) [8]u8 {
-        const ordered_position_type = packed struct {
-            y: i12,
-            z: i26,
-            x: i26,
-        };
-
-        const ordered_position = ordered_position_type{ .y = self.y, .z = self.z, .x = self.x };
-
-        return @bitCast(ordered_position);
-    }
-
-    fn Endian_Position() type {
-        // Is all of this really useful ?
-        // Few computers nowadays are big endian
-        // I only added this because I want the main struct to have this particular order
-        switch (endianness) {
-            std.builtin.Endian.little => {
-                return packed struct {
-                    y: i12,
-                    z: i26,
-                    x: i26,
-                };
-            },
-            std.builtin.Endian.big => {
-                return packed struct {
-                    x: i26,
-                    z: i26,
-                    y: i12,
-                };
-            },
-        }
-    }
-};
 
 /// Imagine having to implement the String type
 const String = struct {
