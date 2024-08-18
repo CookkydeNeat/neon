@@ -108,6 +108,104 @@ pub const VarInt = struct {
     }
 };
 
+/// The var_long number implementation
+///
+/// The same number encoding that varint but for 64 bit integers.
+/// See [the wiki](https://wiki.vg/Protocol#VarInt_and_VarLong) for more informations
+pub const VarLong = struct {
+    value: i64,
+    length: usize,
+
+    /// The value zero as a var_long
+    pub const zero = VarLong{ .value = 0, .length = 1 };
+
+    /// A var_int takes a maximum of 5 bytes, a var_long would use 10
+    const MAX_BYTE_COUNT = 10;
+
+    /// Get a var_long from an integer
+    pub fn fromInt(value: i64) VarLong {
+        // We have to determine the byte length of the var_long representation
+        // Case 1: zero
+        if (value == 0) {
+            return VarLong.zero;
+        }
+
+        // Case 2: negative numbers
+        if (value < 0) {
+            // Minecraft don't use the Zigzag algorithm for var_int numbers so they always get the maximum number of bytes
+            return VarLong{ .value = value, .length = VarLong.MAX_BYTE_COUNT };
+        }
+
+        // Case 3: positive numbers
+        var length: usize = 0;
+        var value_copy: i64 = value;
+        while (value_copy > 0) : (length += 1) {
+            // shift 7 bytes until nothing is left
+            value_copy >>= 7;
+        }
+
+        return VarLong{ .value = value, .length = length };
+    }
+
+    /// Get a var_long from an array of bytes
+    pub fn fromBytes(bytes: []u8) ParserError!VarLong {
+        var result: i64 = 0;
+        var position: u6 = 0;
+        var index: usize = 0;
+        while (true) : ({
+            index += 1;
+            if (index >= MAX_BYTE_COUNT) {
+                // VarInt should not be longer than 5 bytes
+                return ParserError.IntegerOverflow;
+            }
+
+            // Update position after index because we could get an overflow
+            position += 7;
+        }) {
+            if (index >= bytes.len) {
+                // No more data but last byte still had the MSB set
+                return ParserError.InsufficientData;
+            }
+
+            const byte = bytes[index];
+            const segment: i64 = (@as(i64, byte) & 0x7F) << position;
+            result |= segment;
+
+            // Break if MSB is not set
+            if (byte & 0x80 == 0) {
+                break;
+            }
+        }
+        return VarLong{ .value = result, .length = index + 1 };
+    }
+
+    /// Convert the var_long into binary
+    /// The result is a [BoundedArray](https://ziglang.org/documentation/master/std/#std.bounded_array.BoundedArray)
+    /// with a limit of MAX_BYTE_COUNT items
+    pub fn intoBytes(self: VarLong) std.BoundedArray(u8, MAX_BYTE_COUNT) {
+        var bytes = std.BoundedArray(u8, MAX_BYTE_COUNT).init(0) catch unreachable;
+        var value = self.value; // copy value to modify it
+        var i: usize = 0;
+        while (true) : (i += 1) {
+            var part = value & 0x7F;
+            defer bytes.append(@intCast(part)) catch unreachable;
+
+            value >>= 7;
+            if (value == 0) {
+                break;
+            } else {
+                part |= 0x80;
+            }
+
+            if (i >= MAX_BYTE_COUNT - 1) {
+                part &= 0x0F;
+                break;
+            }
+        }
+        return bytes;
+    }
+};
+
 pub const Position = packed struct {
     //Fields are inverted because low endian systems put them in reverse in memory
     y: i12 = 0,
@@ -165,7 +263,6 @@ pub const Position = packed struct {
     pub fn sub(self: Position,other: Position) Position {
         return self.add(Position.new(-other.x, -other.y, -other.z));
     }
-
 };
 
 
@@ -270,6 +367,113 @@ test "VarInt: intoBytes" {
     const v_5 = VarInt.fromInt(-2147483648);
     try expect(v_5.intoBytes().len == 5);
     try expect(std.mem.eql(u8, &v_5.intoBytes().buffer, &[_]u8{ 128, 128, 128, 128, 8 }));
+}
+
+test "VarLong: fromInt" {
+    // fromInt(0)
+    try expect(VarLong.fromInt(0).value == 0);
+    try expect(VarLong.fromInt(0).length == 1);
+
+    // fromInt(1)
+    try expect(VarLong.fromInt(1).value == 1);
+    try expect(VarLong.fromInt(1).length == 1);
+
+    // fromInt(127)
+    try expect(VarLong.fromInt(127).value == 127);
+    try expect(VarLong.fromInt(127).length == 1);
+
+    // fromInt(128)
+    try expect(VarLong.fromInt(128).value == 128);
+    try expect(VarLong.fromInt(128).length == 2);
+
+    // fromInt(2147483647)
+    try expect(VarLong.fromInt(2147483647).value == 2147483647);
+    try expect(VarLong.fromInt(2147483647).length == 5);
+
+    // fromInt(9223372036854775807)
+    try expect(VarLong.fromInt(9223372036854775807).value == 9223372036854775807);
+    try expect(VarLong.fromInt(9223372036854775807).length == 9);
+
+    // fromInt(-1)
+    try expect(VarLong.fromInt(-1).value == -1);
+    try expect(VarLong.fromInt(-1).length == 10);
+}
+
+test "VarLong: fromBytes" {
+    // fromBytes(0)
+    var value = [_]u8{ 0, 0, 0, 0, 0 };
+    try expect((try VarLong.fromBytes(&value)).value == 0);
+    try expect((try VarLong.fromBytes(&value)).length == 1);
+
+    // fromBytes(1)
+    value = [_]u8{ 1, 0, 0, 0, 0 };
+    try expect((try VarLong.fromBytes(&value)).value == 1);
+    try expect((try VarLong.fromBytes(&value)).length == 1);
+
+    // fromBytes(127)
+    value = [_]u8{ 127, 0, 0, 0, 0 };
+    try expect((try VarLong.fromBytes(&value)).value == 127);
+    try expect((try VarLong.fromBytes(&value)).length == 1);
+
+    // fromBytes(128)
+    value = [_]u8{ 128, 1, 0, 0, 0 };
+    try expect((try VarLong.fromBytes(&value)).value == 128);
+    try expect((try VarLong.fromBytes(&value)).length == 2);
+
+    // fromBytes(2147483647)
+    value = [_]u8{ 255, 255, 255, 255, 7 };
+    try expect((try VarLong.fromBytes(&value)).value == 2_147_483_647);
+    try expect((try VarLong.fromBytes(&value)).length == 5);
+
+    // fromBytes(-1)
+    var val = [_]u8{ 255, 255, 255, 255, 255, 255, 255, 255, 255, 1 };
+    try expect((try VarLong.fromBytes(&val)).value == -1);
+    try expect((try VarLong.fromBytes(&val)).length == 10);
+
+    // fromBytes(6) (With buffer size less than 5)
+    var smol_buffer = [_]u8{6};
+    try expect((try VarLong.fromBytes(&smol_buffer)).value == 6);
+    try expect((try VarLong.fromBytes(&smol_buffer)).length == 1);
+
+    // Insufficient data error (we set the MSB but don't provide with the following byte)
+    var missing = [_]u8{128};
+    try expectError(ParserError.InsufficientData, VarInt.fromBytes(&missing));
+
+    // Overflow (We provide with a number bigger than what an i64 can hold)
+    var bigger = [_]u8{ 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 1 };
+    try expectError(ParserError.IntegerOverflow, VarInt.fromBytes(&bigger));
+
+    // Should still work if we provide extra unrelated data
+    var long_buffer = [_]u8{ 255, 255, 255, 255, 255, 255, 255, 255, 127, 23, 46, 23 };
+    try expect((try VarLong.fromBytes(&long_buffer)).value == 9_223_372_036_854_775_807);
+    try expect((try VarLong.fromBytes(&long_buffer)).length == 9);
+}
+
+test "VarLong: intoBytes" {
+    // intoBytes: 0
+    const v_1 = VarLong.fromInt(0);
+    try expect(v_1.intoBytes().len == 1);
+    try expect(std.mem.eql(u8, &v_1.intoBytes().buffer, &[_]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, }));
+
+    // intoBytes: 25565
+    const v_2 = VarLong.fromInt(25565);
+    try expect(v_2.intoBytes().len == 3);
+    try expect(std.mem.eql(u8, &v_2.intoBytes().buffer, &[_]u8{ 221, 199, 1, 0, 0, 0, 0, 0, 0, 0, }));
+
+    // intoBytes: 255
+    const v_3 = VarLong.fromInt(255);
+    try expect(v_3.intoBytes().len == 2);
+    try expect(std.mem.eql(u8, &v_3.intoBytes().buffer, &[_]u8{ 255, 1, 0, 0, 0, 0, 0, 0, 0, 0 }));
+
+    // intoBytes: -1
+    const v_4 = VarLong.fromInt(-1);
+    try expect(v_4.intoBytes().len == 10);
+    try expect(std.mem.eql(u8, &v_4.intoBytes().buffer, &[_]u8{ 255, 255, 255, 255, 255, 255, 255, 255, 255, 15 }));
+
+    // intoBytes: -2147483648
+    const v_5 = VarLong.fromInt(-2147483648);
+    try expect(v_5.intoBytes().len == 10);
+    try expect(std.mem.eql(u8, &v_5.intoBytes().buffer, &[_]u8{ 128, 128, 128, 128, 248, 255, 255, 255, 255, 15 }));
 }
 
 test "Position: origin" {
