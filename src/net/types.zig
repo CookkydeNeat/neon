@@ -206,6 +206,8 @@ pub const VarLong = struct {
     }
 };
 
+/// The minecraft position type
+/// It is composed of a i64 broken into 3 parts representing the x;y;z coordinates
 pub const Position = packed struct {
     //Fields are inverted because low endian systems put them in reverse in memory
     y: i12 = 0,
