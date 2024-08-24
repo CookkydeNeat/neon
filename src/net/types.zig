@@ -1,6 +1,7 @@
 const std = @import("std");
 const expect = std.testing.expect;
 const expectError = std.testing.expectError;
+const Allocator = std.mem.Allocator;
 
 /// Errors related to the type parsing from the client
 pub const ParserError = error {
@@ -8,6 +9,22 @@ pub const ParserError = error {
     InsufficientData,
     /// The number is too big to fit in an integer
     IntegerOverflow
+};
+
+pub const Bytes = struct {
+    allocator: Allocator,
+    data: std.ArrayList(u8),
+    pub fn init(allocator: Allocator) Bytes {
+        const data = std.ArrayList(u8).init(allocator);
+        return Bytes {
+            .allocator = allocator,
+            .data = data
+        };
+    }
+
+    pub fn deinit(self: Bytes) void {
+        self.data.deinit();
+    }
 };
 
 /// The var_int number implementation
@@ -82,15 +99,13 @@ pub const VarInt = struct {
     }
 
     /// Convert the var_int into binary
-    /// The result is a [BoundedArray](https://ziglang.org/documentation/master/std/#std.bounded_array.BoundedArray)
     /// with a limit of MAX_BYTE_COUNT items
-    pub fn intoBytes(self: VarInt) std.BoundedArray(u8, MAX_BYTE_COUNT) {
-        var bytes = std.BoundedArray(u8, MAX_BYTE_COUNT).init(0) catch unreachable;
+    pub fn intoBytes(self: VarInt, bytes: *Bytes) void {
         var value = self.value; // copy value to modify it
         var i: usize = 0;
         while (true) : (i += 1) {
-            var part = value & 0x7F;
-            defer bytes.append(@intCast(part)) catch unreachable;
+            var part: u8 = @intCast(value & 0x7F);
+            defer bytes.*.data.append(part) catch unreachable;
 
             value >>= 7;
             if (value == 0) {
@@ -104,7 +119,7 @@ pub const VarInt = struct {
                 break;
             }
         }
-        return bytes;
+        return;
     }
 };
 
@@ -180,15 +195,13 @@ pub const VarLong = struct {
     }
 
     /// Convert the var_long into binary
-    /// The result is a [BoundedArray](https://ziglang.org/documentation/master/std/#std.bounded_array.BoundedArray)
     /// with a limit of MAX_BYTE_COUNT items
-    pub fn intoBytes(self: VarLong) std.BoundedArray(u8, MAX_BYTE_COUNT) {
-        var bytes = std.BoundedArray(u8, MAX_BYTE_COUNT).init(0) catch unreachable;
+    pub fn intoBytes(self: VarLong, bytes: *Bytes) void {
         var value = self.value; // copy value to modify it
         var i: usize = 0;
         while (true) : (i += 1) {
-            var part = value & 0x7F;
-            defer bytes.append(@intCast(part)) catch unreachable;
+            var part: u8 = @intCast(value & 0x7F);
+            defer bytes.*.data.append(part) catch unreachable;
 
             value >>= 7;
             if (value == 0) {
@@ -202,7 +215,7 @@ pub const VarLong = struct {
                 break;
             }
         }
-        return bytes;
+        return;
     }
 };
 
@@ -246,10 +259,11 @@ pub const Position = packed struct {
 
     /// Convert the position into bytes.
     /// Bytes are big endian
-    pub inline fn intoBytes(self: Position) [8]u8 {
+    pub inline fn intoBytes(self: Position, bytes: *Bytes) void {
         // endianness change
         const unigned_long: u64 = @bitCast(self);
-        return @bitCast(@byteSwap(unigned_long));
+        const bin_pos: [8]u8 = @bitCast(@byteSwap(unigned_long));
+        bytes.data.appendSlice(&bin_pos) catch unreachable;
     }
 
     /// Add both positions together and return a new instance of position
@@ -267,6 +281,29 @@ pub const Position = packed struct {
     }
 };
 
+pub const String = struct {
+    length: VarInt,
+    data: []const u8,
+
+    /// Convert a string into a VarInt prefixed string used in the
+    pub inline fn new(data: []const u8) String {
+        const length = VarInt.fromInt(@intCast(data.len));
+        return String {.length = length,.data=data};
+    }
+
+    /// Get a string from raw bytes
+    pub fn fromBytes(bytes: []u8) ParserError!String {
+        const length = try VarInt.fromBytes(bytes);
+        return String.new(bytes[length.length..(length.length+@as(usize,@intCast(length.value)))]);
+    }
+
+    pub fn intoBytes(self: String,bytes: *Bytes) void {
+        self.length.intoBytes(bytes);
+        bytes.data.appendSlice(self.data) catch unreachable;
+    }
+
+    // if needed add string manipulation functions here
+};
 
 test "VarInt: fromInt" {
     // fromInt(0)
@@ -345,30 +382,49 @@ test "VarInt: fromBytes" {
 }
 
 test "VarInt: intoBytes" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
     // intoBytes: 0
     const v_1 = VarInt.fromInt(0);
-    try expect(v_1.intoBytes().len == 1);
-    try expect(std.mem.eql(u8, &v_1.intoBytes().buffer, &[_]u8{ 0, 0, 0, 0, 0 }));
+    var b_1 = Bytes.init(allocator);
+    defer b_1.deinit();
+    v_1.intoBytes(&b_1);
+    try expect(b_1.data.items.len == 1);
+    try expect(std.mem.eql(u8, b_1.data.items, &[_]u8{ 0 }));
 
     // intoBytes: 25565
     const v_2 = VarInt.fromInt(25565);
-    try expect(v_2.intoBytes().len == 3);
-    try expect(std.mem.eql(u8, &v_2.intoBytes().buffer, &[_]u8{ 221, 199, 1, 0, 0 }));
+    var b_2 = Bytes.init(allocator);
+    defer b_2.deinit();
+    v_2.intoBytes(&b_2);
+    try expect(b_2.data.items.len == 3);
+    try expect(std.mem.eql(u8, b_2.data.items, &[_]u8{ 221, 199, 1 }));
 
     // intoBytes: 255
     const v_3 = VarInt.fromInt(255);
-    try expect(v_3.intoBytes().len == 2);
-    try expect(std.mem.eql(u8, &v_3.intoBytes().buffer, &[_]u8{ 255, 1, 0, 0, 0 }));
+    var b_3 = Bytes.init(allocator);
+    defer b_3.deinit();
+    v_3.intoBytes(&b_3);
+    try expect(b_3.data.items.len == 2);
+    try expect(std.mem.eql(u8, b_3.data.items, &[_]u8{ 255, 1 }));
 
     // intoBytes: -1
     const v_4 = VarInt.fromInt(-1);
-    try expect(v_4.intoBytes().len == 5);
-    try expect(std.mem.eql(u8, &v_4.intoBytes().buffer, &[_]u8{ 255, 255, 255, 255, 15 }));
+    var b_4 = Bytes.init(allocator);
+    defer b_4.deinit();
+    v_4.intoBytes(&b_4);
+    try expect(b_4.data.items.len == 5);
+    try expect(std.mem.eql(u8, b_4.data.items, &[_]u8{ 255, 255, 255, 255, 15 }));
 
     // intoBytes: -2147483648
     const v_5 = VarInt.fromInt(-2147483648);
-    try expect(v_5.intoBytes().len == 5);
-    try expect(std.mem.eql(u8, &v_5.intoBytes().buffer, &[_]u8{ 128, 128, 128, 128, 8 }));
+    var b_5 = Bytes.init(allocator);
+    defer b_5.deinit();
+    v_5.intoBytes(&b_5);
+    try expect(b_5.data.items.len == 5);
+    try expect(std.mem.eql(u8, b_5.data.items, &[_]u8{ 128, 128, 128, 128, 8 }));
 }
 
 test "VarLong: fromInt" {
@@ -452,30 +508,50 @@ test "VarLong: fromBytes" {
 }
 
 test "VarLong: intoBytes" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
     // intoBytes: 0
     const v_1 = VarLong.fromInt(0);
-    try expect(v_1.intoBytes().len == 1);
-    try expect(std.mem.eql(u8, &v_1.intoBytes().buffer, &[_]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, }));
+    var b_1 = Bytes.init(allocator);
+    defer b_1.deinit();
+    v_1.intoBytes(&b_1);
+    try expect(b_1.data.items.len == 1);
+    try expect(std.mem.eql(u8, b_1.data.items, &[_]u8{ 0 }));
 
     // intoBytes: 25565
     const v_2 = VarLong.fromInt(25565);
-    try expect(v_2.intoBytes().len == 3);
-    try expect(std.mem.eql(u8, &v_2.intoBytes().buffer, &[_]u8{ 221, 199, 1, 0, 0, 0, 0, 0, 0, 0, }));
+    var b_2 = Bytes.init(allocator);
+    defer b_2.deinit();
+    v_2.intoBytes(&b_2);
+    try expect(b_2.data.items.len == 3);
+    try expect(std.mem.eql(u8, b_2.data.items, &[_]u8{ 221, 199, 1 }));
+
 
     // intoBytes: 255
     const v_3 = VarLong.fromInt(255);
-    try expect(v_3.intoBytes().len == 2);
-    try expect(std.mem.eql(u8, &v_3.intoBytes().buffer, &[_]u8{ 255, 1, 0, 0, 0, 0, 0, 0, 0, 0 }));
+    var b_3 = Bytes.init(allocator);
+    defer b_3.deinit();
+    v_3.intoBytes(&b_3);
+    try expect(b_3.data.items.len == 2);
+    try expect(std.mem.eql(u8, b_3.data.items, &[_]u8{ 255, 1 }));
 
     // intoBytes: -1
     const v_4 = VarLong.fromInt(-1);
-    try expect(v_4.intoBytes().len == 10);
-    try expect(std.mem.eql(u8, &v_4.intoBytes().buffer, &[_]u8{ 255, 255, 255, 255, 255, 255, 255, 255, 255, 15 }));
+    var b_4 = Bytes.init(allocator);
+    defer b_4.deinit();
+    v_4.intoBytes(&b_4);
+    try expect(b_4.data.items.len == 10);
+    try expect(std.mem.eql(u8, b_4.data.items, &[_]u8{ 255, 255, 255, 255, 255, 255, 255, 255, 255, 15 }));
 
     // intoBytes: -2147483648
     const v_5 = VarLong.fromInt(-2147483648);
-    try expect(v_5.intoBytes().len == 10);
-    try expect(std.mem.eql(u8, &v_5.intoBytes().buffer, &[_]u8{ 128, 128, 128, 128, 248, 255, 255, 255, 255, 15 }));
+    var b_5 = Bytes.init(allocator);
+    defer b_5.deinit();
+    v_5.intoBytes(&b_5);
+    try expect(b_5.data.items.len == 10);
+    try expect(std.mem.eql(u8, b_5.data.items, &[_]u8{ 128, 128, 128, 128, 248, 255, 255, 255, 255, 15 }));
 }
 
 test "Position: origin" {
@@ -537,14 +613,23 @@ test "Position: fromBytes" {
 
 test "Position: intoBytes" {
     const eql = std.mem.eql;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
 
     // Test with 0
     const origin = Position.origin;
-    try expect(eql(u8,&origin.intoBytes(),&[_]u8{0, 0, 0, 0, 0, 0, 0, 0}));
+    var b_1 = Bytes.init(allocator);
+    defer b_1.deinit();
+    origin.intoBytes(&b_1);
+    try expect(eql(u8, b_1.data.items, &[_]u8{ 0, 0, 0, 0, 0, 0, 0, 0 }));
 
     // Test with wiki example
     const pos = Position.fromUnsignedLong(5046110948485792575);
-    try expect(eql(u8,&pos.intoBytes(),&[_]u8{70, 7, 99, 44, 21, 180, 131, 63}));
+    var b_2 = Bytes.init(allocator);
+    defer b_2.deinit();
+    pos.intoBytes(&b_2);
+    try expect(eql(u8, b_2.data.items, &[_]u8{ 70, 7, 99, 44, 21, 180, 131, 63 }));
 }
 
 test "Position: add" {
@@ -589,4 +674,34 @@ test "Position: sub" {
         Position.new(57, 3, 0)
             .sub(Position.new(46, 11,12))
     ));
+}
+
+test "String: new" {
+    const string = String.new("Hello world!");
+    try expect(std.mem.eql(u8, string.data, "Hello world!"));
+    try expect(string.length.value == 12);
+}
+
+test "String: fromBytes" {
+    var bytes = [_]u8{3,72,101,121};
+    const string = try String.fromBytes(&bytes);
+    try expect(std.mem.eql(u8, string.data, "Hey"));
+    try expect(string.length.value == 3);
+}
+
+test "String: intoBytes" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+    const eql = std.mem.eql;
+
+    var string = String.new("Hey");
+    var b_1 = Bytes.init(allocator);
+    defer b_1.deinit();
+    string.intoBytes(&b_1);
+    try expect(eql(u8, b_1.data.items, &[_]u8{ 3, 72 ,101 ,121 }));
+
+    var empty = String.new("");
+    empty.intoBytes(&b_1);
+    try expect(eql(u8, b_1.data.items, &[_]u8{ 3, 72 ,101 ,121, 0 }));
 }
