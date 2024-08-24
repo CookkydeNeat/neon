@@ -3,17 +3,6 @@ const net = std.net;
 const print = std.debug.print;
 const types = @import("net/types.zig");
 
-/// Imagine having to implement the String type
-const String = struct {
-    len: types.VarInt,
-    data: []u8,
-
-    pub fn fromBytes(bytes: []u8) types.ParserError!String {
-        const length = try types.VarInt.fromBytes(bytes);
-        const data = bytes[length.length..];
-        return String{ .len = length, .data = data };
-    }
-};
 
 pub fn main() !void {
     // This code reads the first packet sent by a client
