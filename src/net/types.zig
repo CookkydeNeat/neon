@@ -11,115 +11,60 @@ pub const ParserError = error {
     IntegerOverflow
 };
 
-pub const Bytes = struct {
-    allocator: Allocator,
-    data: std.ArrayList(u8),
-    pub fn init(allocator: Allocator) Bytes {
-        const data = std.ArrayList(u8).init(allocator);
-        return Bytes {
-            .allocator = allocator,
-            .data = data
-        };
-    }
-
-    pub fn deinit(self: Bytes) void {
-        self.data.deinit();
-    }
-};
-
 /// The var_int number implementation
 ///
 /// Mostly an equivalent of a i32 but optimised for small positive integer.
 /// See [the wiki](https://wiki.vg/Protocol#VarInt_and_VarLong) for more informations
 pub const VarInt = struct {
-    value: i32,
-    length: usize,
+    buf: [5]u8,
+    len: u8,
 
-    /// The value zero as a var_int
-    pub const zero = VarInt{ .value = 0, .length = 1 };
-
-    /// A var_int takes a maximum of 5 bytes, a var_long would use 10
     const MAX_BYTE_COUNT = 5;
+    pub fn new(value: i32) VarInt {
+        var result: VarInt = undefined;
+        result.len = 0;
+        var tempValue = value;
 
-    /// Get a var_int from an integer
-    pub fn fromInt(value: i32) VarInt {
-        // We have to determine the byte length of the var_int representation
-        // Case 1: zero
-        if (value == 0) {
-            return VarInt.zero;
+        while (tempValue != 0) {
+            result.buf[result.len] = @as(u8, @intCast((tempValue & 0x7F) | 0x80));
+            result.len += 1;
+            tempValue >>= 7;
         }
-
-        // Case 2: negative numbers
-        if (value < 0) {
-            // Minecraft don't use the Zigzag algorithm for var_int numbers so they always get the maximum number of bytes
-            return VarInt{ .value = value, .length = VarInt.MAX_BYTE_COUNT };
+        if (result.len > 0) {
+            result.buf[result.len - 1] &= 0x7F;
+        } else {
+            result.buf[0] = 0;
+            result.len = 1;
         }
-
-        // Case 3: positive numbers
-        var length: usize = 0;
-        var value_copy: i32 = value;
-        while (value_copy > 0) : (length += 1) {
-            // shift 7 bytes until nothing is left
-            value_copy >>= 7;
-        }
-
-        return VarInt{ .value = value, .length = length };
+        return result;
     }
 
-    /// Get a var_int from an array of bytes
-    pub fn fromBytes(bytes: []u8) ParserError!VarInt {
-        var result: i32 = 0;
-        var position: u5 = 0;
-        var index: usize = 0;
-        while (true) : ({
-            index += 1;
-            if (index >= MAX_BYTE_COUNT) {
-                // VarInt should not be longer than 5 bytes
-                return ParserError.IntegerOverflow;
-            }
-
-            // Update position after index because we could get an overflow
-            position += 7;
-        }) {
-            if (index >= bytes.len) {
-                // No more data but last byte still had the MSB set
-                return ParserError.InsufficientData;
-            }
-
-            const byte = bytes[index];
-            const segment: i32 = (@as(i32, byte) & 0x7F) << position;
-            result |= segment;
-
-            // Break if MSB is not set
-            if (byte & 0x80 == 0) {
-                break;
-            }
-        }
-        return VarInt{ .value = result, .length = index + 1 };
+    pub fn toBytes(self: *const VarInt) []const u8 {
+        return self.buf[0..self.len];
     }
 
-    /// Convert the var_int into binary
-    /// with a limit of MAX_BYTE_COUNT items
-    pub fn intoBytes(self: VarInt, bytes: *Bytes) void {
-        var value = self.value; // copy value to modify it
-        var i: usize = 0;
-        while (true) : (i += 1) {
-            var part: u8 = @intCast(value & 0x7F);
-            defer bytes.*.data.append(part) catch unreachable;
+    pub fn fromSlice(data: []const u8) !VarInt {
+        var result: VarInt = undefined;
+        result.len = 0;
 
-            value >>= 7;
-            if (value == 0) {
-                break;
-            } else {
-                part |= 0x80;
+        //Count the number of bytes to copy
+        while (true): (result.len+=1) {
+            if (result.len > VarInt.MAX_BYTE_COUNT){
+                // Too much data, type may be VarLong instead
+                return error.IntegerOverflow;
             }
-
-            if (i >= MAX_BYTE_COUNT - 1) {
-                part &= 0x0F;
+            if (data.len <= result.len) {
+                // Not enough data
+                return error.InsufficientData;
+            }
+            if ((data[result.len] & 0x80) ==  0) {
+                result.len += 1;
                 break;
             }
         }
-        return;
+        @memcpy(result.buf[0..result.len], data[0..result.len]);
+
+        return result;
     }
 };
 
@@ -128,94 +73,55 @@ pub const VarInt = struct {
 /// The same number encoding that varint but for 64 bit integers.
 /// See [the wiki](https://wiki.vg/Protocol#VarInt_and_VarLong) for more informations
 pub const VarLong = struct {
-    value: i64,
-    length: usize,
+    buf: [10]u8,
+    len: u8,
 
-    /// The value zero as a var_long
-    pub const zero = VarLong{ .value = 0, .length = 1 };
-
-    /// A var_int takes a maximum of 5 bytes, a var_long would use 10
     const MAX_BYTE_COUNT = 10;
+    pub fn new(value: i32) VarLong {
+        var result: VarLong = undefined;
+        result.len = 0;
+        var tempValue = value;
 
-    /// Get a var_long from an integer
-    pub fn fromInt(value: i64) VarLong {
-        // We have to determine the byte length of the var_long representation
-        // Case 1: zero
-        if (value == 0) {
-            return VarLong.zero;
+        while (tempValue != 0) {
+            result.buf[result.len] = @as(u8, @intCast((tempValue & 0x7F) | 0x80));
+            result.len += 1;
+            tempValue >>= 7;
         }
-
-        // Case 2: negative numbers
-        if (value < 0) {
-            // Minecraft don't use the Zigzag algorithm for var_int numbers so they always get the maximum number of bytes
-            return VarLong{ .value = value, .length = VarLong.MAX_BYTE_COUNT };
+        if (result.len > 0) {
+            result.buf[result.len - 1] &= 0x7F;
+        } else {
+            result.buf[0] = 0;
+            result.len = 1;
         }
-
-        // Case 3: positive numbers
-        var length: usize = 0;
-        var value_copy: i64 = value;
-        while (value_copy > 0) : (length += 1) {
-            // shift 7 bytes until nothing is left
-            value_copy >>= 7;
-        }
-
-        return VarLong{ .value = value, .length = length };
+        return result;
     }
 
-    /// Get a var_long from an array of bytes
-    pub fn fromBytes(bytes: []u8) ParserError!VarLong {
-        var result: i64 = 0;
-        var position: u6 = 0;
-        var index: usize = 0;
-        while (true) : ({
-            index += 1;
-            if (index >= MAX_BYTE_COUNT) {
-                // VarInt should not be longer than 5 bytes
-                return ParserError.IntegerOverflow;
-            }
-
-            // Update position after index because we could get an overflow
-            position += 7;
-        }) {
-            if (index >= bytes.len) {
-                // No more data but last byte still had the MSB set
-                return ParserError.InsufficientData;
-            }
-
-            const byte = bytes[index];
-            const segment: i64 = (@as(i64, byte) & 0x7F) << position;
-            result |= segment;
-
-            // Break if MSB is not set
-            if (byte & 0x80 == 0) {
-                break;
-            }
-        }
-        return VarLong{ .value = result, .length = index + 1 };
+    pub fn toBytes(self: *const VarLong) []const u8 {
+        return self.buf[0..self.len];
     }
 
-    /// Convert the var_long into binary
-    /// with a limit of MAX_BYTE_COUNT items
-    pub fn intoBytes(self: VarLong, bytes: *Bytes) void {
-        var value = self.value; // copy value to modify it
-        var i: usize = 0;
-        while (true) : (i += 1) {
-            var part: u8 = @intCast(value & 0x7F);
-            defer bytes.*.data.append(part) catch unreachable;
+    pub fn fromSlice(data: []const u8) !VarLong {
+        var result: VarLong = undefined;
+        result.len = 0;
 
-            value >>= 7;
-            if (value == 0) {
-                break;
-            } else {
-                part |= 0x80;
+        //Count the number of bytes to copy
+        while (true): (result.len+=1) {
+            if (result.len > VarLong.MAX_BYTE_COUNT){
+                // Too much data, type may be VarLong instead
+                return error.IntegerOverflow;
             }
-
-            if (i >= MAX_BYTE_COUNT - 1) {
-                part &= 0x0F;
+            if (data.len <= result.len) {
+                // Not enough data
+                return error.InsufficientData;
+            }
+            if ((data[result.len] & 0x80) ==  0) {
+                result.len += 1;
                 break;
             }
         }
-        return;
+        @memcpy(result.buf[0..result.len], data[0..result.len]);
+
+        return result;
     }
 };
 
@@ -250,20 +156,16 @@ pub const Position = packed struct {
     }
 
     /// Get the position from raw bytes.
-    /// Bytes are assumed sent in big-endian
-    pub inline fn fromBytes(bytes: [8]u8) Position {
-        // endianness change
-        const unsigned_long: u64 = @bitCast(bytes);
-        return Position.fromUnsignedLong(@byteSwap(unsigned_long));
-    }
+    /// Bytes are assumed to be big-endian
+    pub inline fn fromSlice(data: []const u8) !Position {
+        if(data.len < 8) {
+            return error.InsufficientData;
+        }
 
-    /// Convert the position into bytes.
-    /// Bytes are big endian
-    pub inline fn intoBytes(self: Position, bytes: *Bytes) void {
-        // endianness change
-        const unigned_long: u64 = @bitCast(self);
-        const bin_pos: [8]u8 = @bitCast(@byteSwap(unigned_long));
-        bytes.data.appendSlice(&bin_pos) catch unreachable;
+        const bytes: u64 = undefined;
+        @memcpy(bytes, data[0..8]);
+        const position: Position = @bitCast(bytes);
+        return position;
     }
 
     /// Add both positions together and return a new instance of position
@@ -297,12 +199,54 @@ pub const String = struct {
         return String.new(bytes[length.length..(length.length+@as(usize,@intCast(length.value)))]);
     }
 
-    pub fn intoBytes(self: String,bytes: *Bytes) void {
-        self.length.intoBytes(bytes);
-        bytes.data.appendSlice(self.data) catch unreachable;
-    }
+    // pub fn intoBytes(self: String,bytes: *Bytes) void {
+    //     self.length.intoBytes(bytes);
+    //     bytes.data.appendSlice(self.data) catch unreachable;
+    // }
 
     // if needed add string manipulation functions here
+};
+
+pub const Identifier = struct {
+    namespace: []const u8,
+    value: []const u8,
+
+    pub const DefaultNamespace = struct {
+        const Namespace = "minecraft";
+        pub fn new(value: []const u8) Identifier {
+            return Identifier {
+                .namespace = Namespace,
+                .value = value
+            };
+        }
+    };
+
+    pub const ServerNamespace = struct {
+        const Namespace = "neon";
+        pub fn new(value: []const u8) Identifier {
+            return Identifier {
+                .namespace = Namespace,
+                .value = value
+            };
+        }
+    };
+
+    pub fn new(namespace: []const u8,value: []const u8) Identifier {
+        return Identifier {
+            .namespace = namespace,
+            .value = value
+        };
+    }
+
+    // pub fn intoBytes(self: Identifier, bytes: *Bytes) void {
+    //     const total_length = self.namespace.len + self.value.len + 1;
+    //     const length = VarInt.fromInt(@intCast(total_length));
+    //     length.intoBytes(bytes);
+
+    //     bytes.appendSlice(self.namespace) catch unreachable;
+    //     bytes.append(':') catch unreachable;
+    //     bytes.appendSlice(self.value) catch unreachable;
+    // }
 };
 
 test "VarInt: fromInt" {
@@ -704,4 +648,19 @@ test "String: intoBytes" {
     var empty = String.new("");
     empty.intoBytes(&b_1);
     try expect(eql(u8, b_1.data.items, &[_]u8{ 3, 72 ,101 ,121, 0 }));
+}
+
+test "Identifier: intoBytes" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+    const eql = std.mem.eql;
+    const identifier = Identifier {
+        .namespace = "neon",
+        .value = "test"
+    };
+    var bytes = Bytes.init(allocator);
+    defer bytes.deinit();
+    identifier.intoBytes(&bytes);
+    try expect(eql(u8,bytes.data.items,&[_]u8{ 9, 110, 101, 111, 110, 58, 116, 101, 115, 116}));
 }
