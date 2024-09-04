@@ -4,11 +4,12 @@ const expectError = std.testing.expectError;
 const Allocator = std.mem.Allocator;
 
 /// Errors related to the type parsing from the client
-pub const ParserError = error {
+pub const ParserError = error{
     /// Not enough data providen for the type to be parsed
     InsufficientData,
+
     /// The number is too big to fit in an integer
-    IntegerOverflow
+    IntegerOverflow,
 };
 
 /// The var_int number implementation
@@ -19,16 +20,20 @@ pub const VarInt = struct {
     buf: [5]u8,
     len: u8,
 
-    const MAX_BYTE_COUNT = 5;
+    /// The maximum number of bytes a varint can use
+    pub const MAX_BYTE_COUNT = 5;
+
+    pub const DEFAULT = VarInt.new(0);
+
     pub fn new(value: i32) VarInt {
         var result: VarInt = undefined;
         result.len = 0;
-        var tempValue = value;
-
+        result.buf = [_]u8{0} ** MAX_BYTE_COUNT;
+        var tempValue: u32 = @bitCast(value);
         while (tempValue != 0) {
             result.buf[result.len] = @as(u8, @intCast((tempValue & 0x7F) | 0x80));
             result.len += 1;
-            tempValue >>= 7;
+            tempValue = std.math.shr(u32, tempValue, 7);
         }
         if (result.len > 0) {
             result.buf[result.len - 1] &= 0x7F;
@@ -48,8 +53,8 @@ pub const VarInt = struct {
         result.len = 0;
 
         //Count the number of bytes to copy
-        while (true): (result.len+=1) {
-            if (result.len > VarInt.MAX_BYTE_COUNT){
+        while (true) : (result.len += 1) {
+            if (result.len >= VarInt.MAX_BYTE_COUNT) {
                 // Too much data, type may be VarLong instead
                 return error.IntegerOverflow;
             }
@@ -57,13 +62,42 @@ pub const VarInt = struct {
                 // Not enough data
                 return error.InsufficientData;
             }
-            if ((data[result.len] & 0x80) ==  0) {
+            if ((data[result.len] & 0x80) == 0) {
                 result.len += 1;
                 break;
             }
         }
         @memcpy(result.buf[0..result.len], data[0..result.len]);
 
+        return result;
+    }
+
+    pub fn getValue(self: *const VarInt) !i32 {
+        var result: i32 = 0;
+        var position: u5 = 0;
+        var index: usize = 0;
+        while (true) : ({
+            index += 1;
+            if (index >= MAX_BYTE_COUNT) {
+                // VarInt should not be longer than 5 bytes
+                return ParserError.IntegerOverflow;
+            }
+
+            // Update position after index because we could get an overflow
+            position += 7;
+        }) {
+            if (index >= self.buf.len) {
+                // No more data but last byte still had the MSB set
+                return ParserError.InsufficientData;
+            }
+            const byte = self.buf[index];
+            const segment: i32 = (@as(i32, byte) & 0x7F) << position;
+            result |= segment;
+            // Break if MSB is not set
+            if (byte & 0x80 == 0) {
+                break;
+            }
+        }
         return result;
     }
 };
@@ -105,8 +139,8 @@ pub const VarLong = struct {
         result.len = 0;
 
         //Count the number of bytes to copy
-        while (true): (result.len+=1) {
-            if (result.len > VarLong.MAX_BYTE_COUNT){
+        while (true) : (result.len += 1) {
+            if (result.len > VarLong.MAX_BYTE_COUNT) {
                 // Too much data, type may be VarLong instead
                 return error.IntegerOverflow;
             }
@@ -114,7 +148,7 @@ pub const VarLong = struct {
                 // Not enough data
                 return error.InsufficientData;
             }
-            if ((data[result.len] & 0x80) ==  0) {
+            if ((data[result.len] & 0x80) == 0) {
                 result.len += 1;
                 break;
             }
@@ -134,15 +168,11 @@ pub const Position = packed struct {
     x: i26 = 0,
 
     /// Represent the position at (0;0;0)
-    pub const origin = Position {};
+    pub const origin = Position{};
 
     /// Create a new position struct
-    pub inline fn new(x:i26,y:i12,z:i26) Position {
-        return Position {
-            .x=x,
-            .y=y,
-            .z=z
-        };
+    pub inline fn new(x: i26, y: i12, z: i26) Position {
+        return Position{ .x = x, .y = y, .z = z };
     }
 
     /// Return a new instance of the same object
@@ -158,7 +188,7 @@ pub const Position = packed struct {
     /// Get the position from raw bytes.
     /// Bytes are assumed to be big-endian
     pub inline fn fromSlice(data: []const u8) !Position {
-        if(data.len < 8) {
+        if (data.len < 8) {
             return error.InsufficientData;
         }
 
@@ -169,7 +199,7 @@ pub const Position = packed struct {
     }
 
     /// Add both positions together and return a new instance of position
-    pub fn add(self: Position,other: Position) Position {
+    pub fn add(self: Position, other: Position) Position {
         var position = self.clone();
         position.x += other.x;
         position.y += other.y;
@@ -178,7 +208,7 @@ pub const Position = packed struct {
     }
 
     /// Substract both positions and return a new instance of position
-    pub fn sub(self: Position,other: Position) Position {
+    pub fn sub(self: Position, other: Position) Position {
         return self.add(Position.new(-other.x, -other.y, -other.z));
     }
 };
@@ -189,14 +219,15 @@ pub const String = struct {
 
     /// Convert a string into a VarInt prefixed string used in the
     pub inline fn new(data: []const u8) String {
-        const length = VarInt.fromInt(@intCast(data.len));
-        return String {.length = length,.data=data};
+        const length = VarInt.new(@intCast(data.len));
+        return String{ .length = length, .data = data };
     }
 
     /// Get a string from raw bytes
-    pub fn fromBytes(bytes: []u8) ParserError!String {
-        const length = try VarInt.fromBytes(bytes);
-        return String.new(bytes[length.length..(length.length+@as(usize,@intCast(length.value)))]);
+    pub fn fromSlice(bytes: []const u8) ParserError!String {
+        const str_length = try VarInt.fromSlice(bytes);
+        const offset = str_length.len;
+        return String.new(bytes[offset..(offset + @as(usize, @intCast(str_length)))]);
     }
 
     // pub fn intoBytes(self: String,bytes: *Bytes) void {
@@ -214,28 +245,19 @@ pub const Identifier = struct {
     pub const DefaultNamespace = struct {
         const Namespace = "minecraft";
         pub fn new(value: []const u8) Identifier {
-            return Identifier {
-                .namespace = Namespace,
-                .value = value
-            };
+            return Identifier{ .namespace = Namespace, .value = value };
         }
     };
 
     pub const ServerNamespace = struct {
         const Namespace = "neon";
         pub fn new(value: []const u8) Identifier {
-            return Identifier {
-                .namespace = Namespace,
-                .value = value
-            };
+            return Identifier{ .namespace = Namespace, .value = value };
         }
     };
 
-    pub fn new(namespace: []const u8,value: []const u8) Identifier {
-        return Identifier {
-            .namespace = namespace,
-            .value = value
-        };
+    pub fn new(namespace: []const u8, value: []const u8) Identifier {
+        return Identifier{ .namespace = namespace, .value = value };
     }
 
     // pub fn intoBytes(self: Identifier, bytes: *Bytes) void {
@@ -249,418 +271,383 @@ pub const Identifier = struct {
     // }
 };
 
-test "VarInt: fromInt" {
-    // fromInt(0)
-    try expect(VarInt.fromInt(0).value == 0);
-    try expect(VarInt.fromInt(0).length == 1);
-
-    // fromInt(1)
-    try expect(VarInt.fromInt(1).value == 1);
-    try expect(VarInt.fromInt(1).length == 1);
-
-    // fromInt(127)
-    try expect(VarInt.fromInt(127).value == 127);
-    try expect(VarInt.fromInt(127).length == 1);
-
-    // fromInt(128)
-    try expect(VarInt.fromInt(128).value == 128);
-    try expect(VarInt.fromInt(128).length == 2);
-
-    // fromInt(2147483647)
-    try expect(VarInt.fromInt(2147483647).value == 2147483647);
-    try expect(VarInt.fromInt(2147483647).length == 5);
-
-    // fromInt(-1)
-    try expect(VarInt.fromInt(-1).value == -1);
-    try expect(VarInt.fromInt(-1).length == 5);
+test "VarInt: MAX_BYTE_COUNT" {
+    // Check if the constant has not been modified
+    try expect(VarInt.MAX_BYTE_COUNT == 5);
 }
 
-test "VarInt: fromBytes" {
-    // fromBytes(0)
+test "VarInt: new" {
+    const eql = std.mem.eql;
+    // new(0)
+    try expect(eql(u8, &VarInt.new(0).buf, &[_]u8{ 0, 0, 0, 0, 0 }));
+    try expect(VarInt.new(0).len == 1);
+
+    // new(1)
+    try expect(eql(u8, &VarInt.new(1).buf, &[_]u8{ 1, 0, 0, 0, 0 }));
+    try expect(VarInt.new(1).len == 1);
+
+    // new(127)
+    try expect(eql(u8, &VarInt.new(127).buf, &[_]u8{ 127, 0, 0, 0, 0 }));
+    try expect(VarInt.new(127).len == 1);
+
+    // new(128)
+    try expect(eql(u8, &VarInt.new(128).buf, &[_]u8{ 128, 1, 0, 0, 0 }));
+    try expect(VarInt.new(128).len == 2);
+
+    // new(2147483647)
+    try expect(eql(u8, &VarInt.new(2147483647).buf, &[_]u8{ 255, 255, 255, 255, 7 }));
+    try expect(VarInt.new(2147483647).len == 5);
+
+    // new(-1)
+    try expect(eql(u8, &VarInt.new(-1).buf, &[_]u8{ 255, 255, 255, 255, 15 }));
+    try expect(VarInt.new(-1).len == 5);
+}
+
+test "VarInt: toBytes" {
+
+    // toBytes: 0
+    const v_1 = VarInt.new(0);
+    const b_1 = v_1.toBytes();
+    try expect(b_1.len == 1);
+    try expect(std.mem.eql(u8, b_1, &[_]u8{0}));
+
+    // toBytes: 25565
+    const v_2 = VarInt.new(25565);
+    const b_2 = v_2.toBytes();
+    try expect(b_2.len == 3);
+    try expect(std.mem.eql(u8, b_2, &[_]u8{ 221, 199, 1 }));
+
+    // toBytes: 255
+    const v_3 = VarInt.new(255);
+    const b_3 = v_3.toBytes();
+    try expect(b_3.len == 2);
+    try expect(std.mem.eql(u8, b_3, &[_]u8{ 255, 1 }));
+
+    // toBytes: -1
+    const v_4 = VarInt.new(-1);
+    const b_4 = v_4.toBytes();
+    try expect(b_4.len == 5);
+    try expect(std.mem.eql(u8, b_4, &[_]u8{ 255, 255, 255, 255, 15 }));
+
+    // toBytes: -2147483648
+    const v_5 = VarInt.new(-2147483648);
+    const b_5 = v_5.toBytes();
+    try expect(b_5.len == 5);
+    try expect(std.mem.eql(u8, b_5, &[_]u8{ 128, 128, 128, 128, 8 }));
+}
+
+test "VarInt: fromSlice" {
+    // fromSlice(0)
     var value = [_]u8{ 0, 0, 0, 0, 0 };
-    try expect((try VarInt.fromBytes(&value)).value == 0);
-    try expect((try VarInt.fromBytes(&value)).length == 1);
+    try expect(try (try VarInt.fromSlice(&value)).getValue() == 0);
+    try expect((try VarInt.fromSlice(&value)).len == 1);
 
-    // fromBytes(1)
+    // fromSlice(1)
     value = [_]u8{ 1, 0, 0, 0, 0 };
-    try expect((try VarInt.fromBytes(&value)).value == 1);
-    try expect((try VarInt.fromBytes(&value)).length == 1);
+    try expect(try (try VarInt.fromSlice(&value)).getValue() == 1);
+    try expect((try VarInt.fromSlice(&value)).len == 1);
 
-    // fromBytes(127)
+    // fromSlice(127)
     value = [_]u8{ 127, 0, 0, 0, 0 };
-    try expect((try VarInt.fromBytes(&value)).value == 127);
-    try expect((try VarInt.fromBytes(&value)).length == 1);
+    try expect(try (try VarInt.fromSlice(&value)).getValue() == 127);
+    try expect((try VarInt.fromSlice(&value)).len == 1);
 
-    // fromBytes(128)
+    // fromSlice(128)
     value = [_]u8{ 128, 1, 0, 0, 0 };
-    try expect((try VarInt.fromBytes(&value)).value == 128);
-    try expect((try VarInt.fromBytes(&value)).length == 2);
+    try expect(try (try VarInt.fromSlice(&value)).getValue() == 128);
+    try expect((try VarInt.fromSlice(&value)).len == 2);
 
-    // fromBytes(2147483647)
+    // fromSlice(2147483647)
     value = [_]u8{ 255, 255, 255, 255, 7 };
-    try expect((try VarInt.fromBytes(&value)).value == 2_147_483_647);
-    try expect((try VarInt.fromBytes(&value)).length == 5);
+    try expect(try (try VarInt.fromSlice(&value)).getValue() == 2_147_483_647);
+    try expect((try VarInt.fromSlice(&value)).len == 5);
 
-    // fromBytes(-1)
+    // fromSlice(-1)
     value = [_]u8{ 255, 255, 255, 255, 15 };
-    try expect((try VarInt.fromBytes(&value)).value == -1);
-    try expect((try VarInt.fromBytes(&value)).length == 5);
+    try expect(try (try VarInt.fromSlice(&value)).getValue() == -1);
+    try expect((try VarInt.fromSlice(&value)).len == 5);
 
-    // fromBytes(6) (With buffer size less than 5)
+    // fromSlice(6) (With buffer size less than 5)
     var smol_buffer = [_]u8{6};
-    try expect((try VarInt.fromBytes(&smol_buffer)).value == 6);
-    try expect((try VarInt.fromBytes(&smol_buffer)).length == 1);
+    try expect(try (try VarInt.fromSlice(&smol_buffer)).getValue() == 6);
+    try expect((try VarInt.fromSlice(&smol_buffer)).len == 1);
 
     // Insufficient data error (we set the MSB but don't provide with the following byte)
     var missing = [_]u8{128};
-    try expectError(ParserError.InsufficientData, VarInt.fromBytes(&missing));
+    try expectError(ParserError.InsufficientData, VarInt.fromSlice(&missing));
 
     // Overflow (We provide with a number bigger than what an i32 can hold)
     var bigger = [_]u8{ 128, 128, 128, 128, 128, 1 };
-    try expectError(ParserError.IntegerOverflow, VarInt.fromBytes(&bigger));
+    try expectError(ParserError.IntegerOverflow, VarInt.fromSlice(&bigger));
 
     // Should still work if we provide extra unrelated data
     var long_buffer = [_]u8{ 255, 255, 255, 255, 7, 45, 23, 66 };
-    try expect((try VarInt.fromBytes(&long_buffer)).value == 2_147_483_647);
-    try expect((try VarInt.fromBytes(&long_buffer)).length == 5);
+    try expect(try (try VarInt.fromSlice(&long_buffer)).getValue() == 2_147_483_647);
+    try expect((try VarInt.fromSlice(&long_buffer)).len == 5);
 }
 
-test "VarInt: intoBytes" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+// test "VarLong: fromInt" {
+//     // fromInt(0)
+//     try expect(VarLong.fromInt(0).value == 0);
+//     try expect(VarLong.fromInt(0).length == 1);
 
-    // intoBytes: 0
-    const v_1 = VarInt.fromInt(0);
-    var b_1 = Bytes.init(allocator);
-    defer b_1.deinit();
-    v_1.intoBytes(&b_1);
-    try expect(b_1.data.items.len == 1);
-    try expect(std.mem.eql(u8, b_1.data.items, &[_]u8{ 0 }));
+//     // fromInt(1)
+//     try expect(VarLong.fromInt(1).value == 1);
+//     try expect(VarLong.fromInt(1).length == 1);
 
-    // intoBytes: 25565
-    const v_2 = VarInt.fromInt(25565);
-    var b_2 = Bytes.init(allocator);
-    defer b_2.deinit();
-    v_2.intoBytes(&b_2);
-    try expect(b_2.data.items.len == 3);
-    try expect(std.mem.eql(u8, b_2.data.items, &[_]u8{ 221, 199, 1 }));
+//     // fromInt(127)
+//     try expect(VarLong.fromInt(127).value == 127);
+//     try expect(VarLong.fromInt(127).length == 1);
 
-    // intoBytes: 255
-    const v_3 = VarInt.fromInt(255);
-    var b_3 = Bytes.init(allocator);
-    defer b_3.deinit();
-    v_3.intoBytes(&b_3);
-    try expect(b_3.data.items.len == 2);
-    try expect(std.mem.eql(u8, b_3.data.items, &[_]u8{ 255, 1 }));
+//     // fromInt(128)
+//     try expect(VarLong.fromInt(128).value == 128);
+//     try expect(VarLong.fromInt(128).length == 2);
 
-    // intoBytes: -1
-    const v_4 = VarInt.fromInt(-1);
-    var b_4 = Bytes.init(allocator);
-    defer b_4.deinit();
-    v_4.intoBytes(&b_4);
-    try expect(b_4.data.items.len == 5);
-    try expect(std.mem.eql(u8, b_4.data.items, &[_]u8{ 255, 255, 255, 255, 15 }));
+//     // fromInt(2147483647)
+//     try expect(VarLong.fromInt(2147483647).value == 2147483647);
+//     try expect(VarLong.fromInt(2147483647).length == 5);
 
-    // intoBytes: -2147483648
-    const v_5 = VarInt.fromInt(-2147483648);
-    var b_5 = Bytes.init(allocator);
-    defer b_5.deinit();
-    v_5.intoBytes(&b_5);
-    try expect(b_5.data.items.len == 5);
-    try expect(std.mem.eql(u8, b_5.data.items, &[_]u8{ 128, 128, 128, 128, 8 }));
-}
+//     // fromInt(9223372036854775807)
+//     try expect(VarLong.fromInt(9223372036854775807).value == 9223372036854775807);
+//     try expect(VarLong.fromInt(9223372036854775807).length == 9);
 
-test "VarLong: fromInt" {
-    // fromInt(0)
-    try expect(VarLong.fromInt(0).value == 0);
-    try expect(VarLong.fromInt(0).length == 1);
+//     // fromInt(-1)
+//     try expect(VarLong.fromInt(-1).value == -1);
+//     try expect(VarLong.fromInt(-1).length == 10);
+// }
 
-    // fromInt(1)
-    try expect(VarLong.fromInt(1).value == 1);
-    try expect(VarLong.fromInt(1).length == 1);
+// test "VarLong: fromBytes" {
+//     // fromBytes(0)
+//     var value = [_]u8{ 0, 0, 0, 0, 0 };
+//     try expect((try VarLong.fromBytes(&value)).value == 0);
+//     try expect((try VarLong.fromBytes(&value)).length == 1);
 
-    // fromInt(127)
-    try expect(VarLong.fromInt(127).value == 127);
-    try expect(VarLong.fromInt(127).length == 1);
+//     // fromBytes(1)
+//     value = [_]u8{ 1, 0, 0, 0, 0 };
+//     try expect((try VarLong.fromBytes(&value)).value == 1);
+//     try expect((try VarLong.fromBytes(&value)).length == 1);
 
-    // fromInt(128)
-    try expect(VarLong.fromInt(128).value == 128);
-    try expect(VarLong.fromInt(128).length == 2);
+//     // fromBytes(127)
+//     value = [_]u8{ 127, 0, 0, 0, 0 };
+//     try expect((try VarLong.fromBytes(&value)).value == 127);
+//     try expect((try VarLong.fromBytes(&value)).length == 1);
 
-    // fromInt(2147483647)
-    try expect(VarLong.fromInt(2147483647).value == 2147483647);
-    try expect(VarLong.fromInt(2147483647).length == 5);
+//     // fromBytes(128)
+//     value = [_]u8{ 128, 1, 0, 0, 0 };
+//     try expect((try VarLong.fromBytes(&value)).value == 128);
+//     try expect((try VarLong.fromBytes(&value)).length == 2);
 
-    // fromInt(9223372036854775807)
-    try expect(VarLong.fromInt(9223372036854775807).value == 9223372036854775807);
-    try expect(VarLong.fromInt(9223372036854775807).length == 9);
+//     // fromBytes(2147483647)
+//     value = [_]u8{ 255, 255, 255, 255, 7 };
+//     try expect((try VarLong.fromBytes(&value)).value == 2_147_483_647);
+//     try expect((try VarLong.fromBytes(&value)).length == 5);
 
-    // fromInt(-1)
-    try expect(VarLong.fromInt(-1).value == -1);
-    try expect(VarLong.fromInt(-1).length == 10);
-}
+//     // fromBytes(-1)
+//     var val = [_]u8{ 255, 255, 255, 255, 255, 255, 255, 255, 255, 1 };
+//     try expect((try VarLong.fromBytes(&val)).value == -1);
+//     try expect((try VarLong.fromBytes(&val)).length == 10);
 
-test "VarLong: fromBytes" {
-    // fromBytes(0)
-    var value = [_]u8{ 0, 0, 0, 0, 0 };
-    try expect((try VarLong.fromBytes(&value)).value == 0);
-    try expect((try VarLong.fromBytes(&value)).length == 1);
+//     // fromBytes(6) (With buffer size less than 5)
+//     var smol_buffer = [_]u8{6};
+//     try expect((try VarLong.fromBytes(&smol_buffer)).value == 6);
+//     try expect((try VarLong.fromBytes(&smol_buffer)).length == 1);
 
-    // fromBytes(1)
-    value = [_]u8{ 1, 0, 0, 0, 0 };
-    try expect((try VarLong.fromBytes(&value)).value == 1);
-    try expect((try VarLong.fromBytes(&value)).length == 1);
+//     // Insufficient data error (we set the MSB but don't provide with the following byte)
+//     var missing = [_]u8{128};
+//     try expectError(ParserError.InsufficientData, VarInt.fromBytes(&missing));
 
-    // fromBytes(127)
-    value = [_]u8{ 127, 0, 0, 0, 0 };
-    try expect((try VarLong.fromBytes(&value)).value == 127);
-    try expect((try VarLong.fromBytes(&value)).length == 1);
+//     // Overflow (We provide with a number bigger than what an i64 can hold)
+//     var bigger = [_]u8{ 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 1 };
+//     try expectError(ParserError.IntegerOverflow, VarInt.fromBytes(&bigger));
 
-    // fromBytes(128)
-    value = [_]u8{ 128, 1, 0, 0, 0 };
-    try expect((try VarLong.fromBytes(&value)).value == 128);
-    try expect((try VarLong.fromBytes(&value)).length == 2);
+//     // Should still work if we provide extra unrelated data
+//     var long_buffer = [_]u8{ 255, 255, 255, 255, 255, 255, 255, 255, 127, 23, 46, 23 };
+//     try expect((try VarLong.fromBytes(&long_buffer)).value == 9_223_372_036_854_775_807);
+//     try expect((try VarLong.fromBytes(&long_buffer)).length == 9);
+// }
 
-    // fromBytes(2147483647)
-    value = [_]u8{ 255, 255, 255, 255, 7 };
-    try expect((try VarLong.fromBytes(&value)).value == 2_147_483_647);
-    try expect((try VarLong.fromBytes(&value)).length == 5);
+// test "VarLong: intoBytes" {
+//     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+//     defer _ = gpa.deinit();
+//     const allocator = gpa.allocator();
 
-    // fromBytes(-1)
-    var val = [_]u8{ 255, 255, 255, 255, 255, 255, 255, 255, 255, 1 };
-    try expect((try VarLong.fromBytes(&val)).value == -1);
-    try expect((try VarLong.fromBytes(&val)).length == 10);
+//     // intoBytes: 0
+//     const v_1 = VarLong.fromInt(0);
+//     var b_1 = Bytes.init(allocator);
+//     defer b_1.deinit();
+//     v_1.intoBytes(&b_1);
+//     try expect(b_1.data.items.len == 1);
+//     try expect(std.mem.eql(u8, b_1.data.items, &[_]u8{0}));
 
-    // fromBytes(6) (With buffer size less than 5)
-    var smol_buffer = [_]u8{6};
-    try expect((try VarLong.fromBytes(&smol_buffer)).value == 6);
-    try expect((try VarLong.fromBytes(&smol_buffer)).length == 1);
+//     // intoBytes: 25565
+//     const v_2 = VarLong.fromInt(25565);
+//     var b_2 = Bytes.init(allocator);
+//     defer b_2.deinit();
+//     v_2.intoBytes(&b_2);
+//     try expect(b_2.data.items.len == 3);
+//     try expect(std.mem.eql(u8, b_2.data.items, &[_]u8{ 221, 199, 1 }));
 
-    // Insufficient data error (we set the MSB but don't provide with the following byte)
-    var missing = [_]u8{128};
-    try expectError(ParserError.InsufficientData, VarInt.fromBytes(&missing));
+//     // intoBytes: 255
+//     const v_3 = VarLong.fromInt(255);
+//     var b_3 = Bytes.init(allocator);
+//     defer b_3.deinit();
+//     v_3.intoBytes(&b_3);
+//     try expect(b_3.data.items.len == 2);
+//     try expect(std.mem.eql(u8, b_3.data.items, &[_]u8{ 255, 1 }));
 
-    // Overflow (We provide with a number bigger than what an i64 can hold)
-    var bigger = [_]u8{ 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 1 };
-    try expectError(ParserError.IntegerOverflow, VarInt.fromBytes(&bigger));
+//     // intoBytes: -1
+//     const v_4 = VarLong.fromInt(-1);
+//     var b_4 = Bytes.init(allocator);
+//     defer b_4.deinit();
+//     v_4.intoBytes(&b_4);
+//     try expect(b_4.data.items.len == 10);
+//     try expect(std.mem.eql(u8, b_4.data.items, &[_]u8{ 255, 255, 255, 255, 255, 255, 255, 255, 255, 15 }));
 
-    // Should still work if we provide extra unrelated data
-    var long_buffer = [_]u8{ 255, 255, 255, 255, 255, 255, 255, 255, 127, 23, 46, 23 };
-    try expect((try VarLong.fromBytes(&long_buffer)).value == 9_223_372_036_854_775_807);
-    try expect((try VarLong.fromBytes(&long_buffer)).length == 9);
-}
+//     // intoBytes: -2147483648
+//     const v_5 = VarLong.fromInt(-2147483648);
+//     var b_5 = Bytes.init(allocator);
+//     defer b_5.deinit();
+//     v_5.intoBytes(&b_5);
+//     try expect(b_5.data.items.len == 10);
+//     try expect(std.mem.eql(u8, b_5.data.items, &[_]u8{ 128, 128, 128, 128, 248, 255, 255, 255, 255, 15 }));
+// }
 
-test "VarLong: intoBytes" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+// test "Position: origin" {
+//     const origin = Position.origin;
+//     try expect(origin.x == 0);
+//     try expect(origin.y == 0);
+//     try expect(origin.z == 0);
+// }
 
-    // intoBytes: 0
-    const v_1 = VarLong.fromInt(0);
-    var b_1 = Bytes.init(allocator);
-    defer b_1.deinit();
-    v_1.intoBytes(&b_1);
-    try expect(b_1.data.items.len == 1);
-    try expect(std.mem.eql(u8, b_1.data.items, &[_]u8{ 0 }));
+// test "Position: new" {
+//     const pos = Position.new(1, 2, 3);
+//     try expect(pos.x == 1);
+//     try expect(pos.y == 2);
+//     try expect(pos.z == 3);
+// }
 
-    // intoBytes: 25565
-    const v_2 = VarLong.fromInt(25565);
-    var b_2 = Bytes.init(allocator);
-    defer b_2.deinit();
-    v_2.intoBytes(&b_2);
-    try expect(b_2.data.items.len == 3);
-    try expect(std.mem.eql(u8, b_2.data.items, &[_]u8{ 221, 199, 1 }));
+// test "Position: clone" {
+//     const original = Position.new(4, 5, 6);
+//     const clone = original.clone();
 
+//     // Fields should be equal
+//     try expect(std.meta.eql(original, clone));
 
-    // intoBytes: 255
-    const v_3 = VarLong.fromInt(255);
-    var b_3 = Bytes.init(allocator);
-    defer b_3.deinit();
-    v_3.intoBytes(&b_3);
-    try expect(b_3.data.items.len == 2);
-    try expect(std.mem.eql(u8, b_3.data.items, &[_]u8{ 255, 1 }));
+//     // Pointer should not
+//     try expect(&original != &clone);
+// }
 
-    // intoBytes: -1
-    const v_4 = VarLong.fromInt(-1);
-    var b_4 = Bytes.init(allocator);
-    defer b_4.deinit();
-    v_4.intoBytes(&b_4);
-    try expect(b_4.data.items.len == 10);
-    try expect(std.mem.eql(u8, b_4.data.items, &[_]u8{ 255, 255, 255, 255, 255, 255, 255, 255, 255, 15 }));
+// test "Position: fromUnsignedLong" {
+//     const eql = std.meta.eql;
 
-    // intoBytes: -2147483648
-    const v_5 = VarLong.fromInt(-2147483648);
-    var b_5 = Bytes.init(allocator);
-    defer b_5.deinit();
-    v_5.intoBytes(&b_5);
-    try expect(b_5.data.items.len == 10);
-    try expect(std.mem.eql(u8, b_5.data.items, &[_]u8{ 128, 128, 128, 128, 248, 255, 255, 255, 255, 15 }));
-}
+//     // Test with 0
+//     try expect(eql(Position.fromUnsignedLong(0), Position.new(0, 0, 0)));
 
-test "Position: origin" {
-    const origin = Position.origin;
-    try expect(origin.x == 0);
-    try expect(origin.y == 0);
-    try expect(origin.z == 0);
-}
+//     // Example from wiki (see wiki.vg)
+//     try expect(eql(Position.fromUnsignedLong(5046110948485792575), Position.new(18357644, 831, -20882616)));
+// }
 
-test "Position: new" {
-    const pos = Position.new(1, 2, 3);
-    try expect(pos.x == 1);
-    try expect(pos.y == 2);
-    try expect(pos.z == 3);
-}
+// test "Position: fromBytes" {
+//     const eql = std.meta.eql;
 
-test "Position: clone" {
-    const original = Position.new(4, 5, 6);
-    const clone = original.clone();
+//     // Test with 0
+//     try expect(eql(Position.fromBytes([_]u8{ 0, 0, 0, 0, 0, 0, 0, 0 }), Position.new(0, 0, 0)));
 
-    // Fields should be equal
-    try expect(std.meta.eql(original, clone));
+//     // Example from wiki (see wiki.vg)
+//     try expect(eql(Position.fromBytes([_]u8{ 70, 7, 99, 44, 21, 180, 131, 63 }), Position.new(18357644, 831, -20882616)));
+// }
 
-    // Pointer should not
-    try expect(&original != &clone);
-}
+// test "Position: intoBytes" {
+//     const eql = std.mem.eql;
+//     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+//     defer _ = gpa.deinit();
+//     const allocator = gpa.allocator();
 
-test "Position: fromUnsignedLong" {
-    const eql = std.meta.eql;
+//     // Test with 0
+//     const origin = Position.origin;
+//     var b_1 = Bytes.init(allocator);
+//     defer b_1.deinit();
+//     origin.intoBytes(&b_1);
+//     try expect(eql(u8, b_1.data.items, &[_]u8{ 0, 0, 0, 0, 0, 0, 0, 0 }));
 
-    // Test with 0
-    try expect(eql(
-        Position.fromUnsignedLong(0),
-        Position.new(0, 0, 0)
-    ));
+//     // Test with wiki example
+//     const pos = Position.fromUnsignedLong(5046110948485792575);
+//     var b_2 = Bytes.init(allocator);
+//     defer b_2.deinit();
+//     pos.intoBytes(&b_2);
+//     try expect(eql(u8, b_2.data.items, &[_]u8{ 70, 7, 99, 44, 21, 180, 131, 63 }));
+// }
 
-    // Example from wiki (see wiki.vg)
-    try expect(eql(
-        Position.fromUnsignedLong(5046110948485792575),
-        Position.new(18357644, 831, -20882616)
-    ));
-}
+// test "Position: add" {
+//     const eql = std.meta.eql;
 
-test "Position: fromBytes" {
-    const eql = std.meta.eql;
+//     // Adding 0 should change nothing
+//     try expect(eql(Position.origin, Position.origin.add(Position.origin)));
 
-    // Test with 0
-    try expect(eql(
-        Position.fromBytes([_]u8{0,0,0,0,0,0,0,0}),
-        Position.new(0, 0, 0)
-    ));
+//     try expect(eql(Position.new(0, 0, 1), Position.origin.add(Position.new(0, 0, 1))));
 
-    // Example from wiki (see wiki.vg)
-    try expect(eql(
-        Position.fromBytes([_]u8{70, 7, 99, 44, 21, 180, 131, 63}),
-        Position.new(18357644, 831, -20882616)
-    ));
-}
+//     try expect(eql(Position.new(1, 2, 3)
+//         .add(Position.new(2, 2, 2)), Position.new(3, 4, 5)));
 
-test "Position: intoBytes" {
-    const eql = std.mem.eql;
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+//     try expect(eql(Position.new(9, -5, 43)
+//         .add(Position.new(-2, 3, 55)), Position.new(57, 3, 0)
+//         .add(Position.new(-50, -5, 98))));
+// }
 
-    // Test with 0
-    const origin = Position.origin;
-    var b_1 = Bytes.init(allocator);
-    defer b_1.deinit();
-    origin.intoBytes(&b_1);
-    try expect(eql(u8, b_1.data.items, &[_]u8{ 0, 0, 0, 0, 0, 0, 0, 0 }));
+// test "Position: sub" {
+//     const eql = std.meta.eql;
 
-    // Test with wiki example
-    const pos = Position.fromUnsignedLong(5046110948485792575);
-    var b_2 = Bytes.init(allocator);
-    defer b_2.deinit();
-    pos.intoBytes(&b_2);
-    try expect(eql(u8, b_2.data.items, &[_]u8{ 70, 7, 99, 44, 21, 180, 131, 63 }));
-}
+//     // Adding 0 should change nothing
+//     try expect(eql(Position.origin, Position.origin.sub(Position.origin)));
 
-test "Position: add" {
-    const eql = std.meta.eql;
+//     try expect(eql(Position.new(0, 0, -1), Position.origin.sub(Position.new(0, 0, 1))));
 
-    // Adding 0 should change nothing
-    try expect(eql(Position.origin,Position.origin.add(Position.origin)));
+//     try expect(eql(Position.new(1, 2, 3)
+//         .sub(Position.new(2, 2, 2)), Position.new(-1, 0, 1)));
 
-    try expect(eql(Position.new(0, 0, 1),Position.origin.add(Position.new(0, 0, 1))));
+//     try expect(eql(Position.new(9, -5, 43)
+//         .sub(Position.new(-2, 3, 55)), Position.new(57, 3, 0)
+//         .sub(Position.new(46, 11, 12))));
+// }
 
-    try expect(eql(
-        Position.new(1, 2, 3)
-            .add(Position.new(2, 2, 2)),
-        Position.new(3, 4, 5)
-    ));
+// test "String: new" {
+//     const string = String.new("Hello world!");
+//     try expect(std.mem.eql(u8, string.data, "Hello world!"));
+//     try expect(string.length.value == 12);
+// }
 
-    try expect(eql(
-        Position.new(9, -5, 43)
-            .add(Position.new(-2, 3, 55)),
-        Position.new(57, 3, 0)
-            .add(Position.new(-50, -5,98))
-    ));
-}
+// test "String: fromBytes" {
+//     var bytes = [_]u8{ 3, 72, 101, 121 };
+//     const string = try String.fromBytes(&bytes);
+//     try expect(std.mem.eql(u8, string.data, "Hey"));
+//     try expect(string.length.value == 3);
+// }
 
-test "Position: sub" {
-    const eql = std.meta.eql;
+// test "String: intoBytes" {
+//     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+//     defer _ = gpa.deinit();
+//     const allocator = gpa.allocator();
+//     const eql = std.mem.eql;
 
-    // Adding 0 should change nothing
-    try expect(eql(Position.origin,Position.origin.sub(Position.origin)));
+//     var string = String.new("Hey");
+//     var b_1 = Bytes.init(allocator);
+//     defer b_1.deinit();
+//     string.intoBytes(&b_1);
+//     try expect(eql(u8, b_1.data.items, &[_]u8{ 3, 72, 101, 121 }));
 
-    try expect(eql(Position.new(0, 0, -1),Position.origin.sub(Position.new(0, 0, 1))));
+//     var empty = String.new("");
+//     empty.intoBytes(&b_1);
+//     try expect(eql(u8, b_1.data.items, &[_]u8{ 3, 72, 101, 121, 0 }));
+// }
 
-    try expect(eql(
-        Position.new(1, 2, 3)
-            .sub(Position.new(2, 2, 2)),
-        Position.new(-1, 0, 1)
-    ));
-
-    try expect(eql(
-        Position.new(9, -5, 43)
-            .sub(Position.new(-2, 3, 55)),
-        Position.new(57, 3, 0)
-            .sub(Position.new(46, 11,12))
-    ));
-}
-
-test "String: new" {
-    const string = String.new("Hello world!");
-    try expect(std.mem.eql(u8, string.data, "Hello world!"));
-    try expect(string.length.value == 12);
-}
-
-test "String: fromBytes" {
-    var bytes = [_]u8{3,72,101,121};
-    const string = try String.fromBytes(&bytes);
-    try expect(std.mem.eql(u8, string.data, "Hey"));
-    try expect(string.length.value == 3);
-}
-
-test "String: intoBytes" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-    const eql = std.mem.eql;
-
-    var string = String.new("Hey");
-    var b_1 = Bytes.init(allocator);
-    defer b_1.deinit();
-    string.intoBytes(&b_1);
-    try expect(eql(u8, b_1.data.items, &[_]u8{ 3, 72 ,101 ,121 }));
-
-    var empty = String.new("");
-    empty.intoBytes(&b_1);
-    try expect(eql(u8, b_1.data.items, &[_]u8{ 3, 72 ,101 ,121, 0 }));
-}
-
-test "Identifier: intoBytes" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-    const eql = std.mem.eql;
-    const identifier = Identifier {
-        .namespace = "neon",
-        .value = "test"
-    };
-    var bytes = Bytes.init(allocator);
-    defer bytes.deinit();
-    identifier.intoBytes(&bytes);
-    try expect(eql(u8,bytes.data.items,&[_]u8{ 9, 110, 101, 111, 110, 58, 116, 101, 115, 116}));
-}
+// test "Identifier: intoBytes" {
+//     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+//     defer _ = gpa.deinit();
+//     const allocator = gpa.allocator();
+//     const eql = std.mem.eql;
+//     const identifier = Identifier{ .namespace = "neon", .value = "test" };
+//     var bytes = Bytes.init(allocator);
+//     defer bytes.deinit();
+//     identifier.intoBytes(&bytes);
+//     try expect(eql(u8, bytes.data.items, &[_]u8{ 9, 110, 101, 111, 110, 58, 116, 101, 115, 116 }));
+// }

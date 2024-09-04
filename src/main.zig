@@ -26,7 +26,7 @@ pub fn main() !void {
     print("{d}\n", .{writer.getSlice()});
     defer writer.deinit();
 
-    const test_data = [_]u8{65,70,0,0,0,1};
+    const test_data = [_]u8{ 65, 70, 0, 0, 0, 1 };
     const TestPacket = struct {
         a: f32,
         b: struct {
@@ -37,14 +37,12 @@ pub fn main() !void {
     var reader = packets.PacketReader.init(&test_data);
     print("{any}\n", .{try reader.readType(types.VarInt)});
 
-
     // try listen(&server,allocator);
 
 }
 
-pub fn listen(server: *std.net.Server,allocator:std.mem.Allocator) !void {
+pub fn listen(server: *std.net.Server, allocator: std.mem.Allocator) !void {
     while (true) {
-
         var client = try server.accept();
         defer client.stream.close();
 
@@ -53,10 +51,14 @@ pub fn listen(server: *std.net.Server,allocator:std.mem.Allocator) !void {
         const message = try client.stream.reader().readAllAlloc(allocator, 1024);
         defer allocator.free(message);
 
-        const one = types.VarInt.fromBytes(message) catch types.VarInt.zero;
-        const two = types.VarInt.fromBytes(message[one.length..]) catch types.VarInt.zero;
+        const one = types.VarInt.fromSlice(message) catch types.VarInt.DEFAULT;
+        const two = types.VarInt.fromSlice(message[one.len..]) catch types.VarInt.DEFAULT;
 
-        print("{} Send packet with id {x}\n", .{ client.address, two.value });
-
+        print("{} Send packet with id {x}\n", .{ client.address, try two.getValue() });
     }
+}
+
+test {
+    // IDK what this code does but without it tests won't run
+    @import("std").testing.refAllDecls(@This());
 }
