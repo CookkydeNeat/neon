@@ -100,6 +100,17 @@ pub const VarInt = struct {
         }
         return result;
     }
+
+    pub fn format(
+        self: *const VarInt,
+        comptime _: []const u8,
+        _: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        try writer.writeAll("VarInt(");
+        _ = try writer.print("{}", .{try self.getValue()});
+        try writer.writeAll(")");
+    }
 };
 
 /// The var_long number implementation
@@ -110,7 +121,7 @@ pub const VarLong = struct {
     buf: [10]u8,
     len: u8,
 
-    const MAX_BYTE_COUNT = 10;
+    pub const MAX_BYTE_COUNT = 10;
     pub fn new(value: i32) VarLong {
         var result: VarLong = undefined;
         result.len = 0;
@@ -214,8 +225,8 @@ pub const Position = packed struct {
 };
 
 pub const String = struct {
-    length: VarInt,
     data: []const u8,
+    length: VarInt,
 
     /// Convert a string into a VarInt prefixed string used in the
     pub inline fn new(data: []const u8) String {
@@ -227,14 +238,28 @@ pub const String = struct {
     pub fn fromSlice(bytes: []const u8) ParserError!String {
         const str_length = try VarInt.fromSlice(bytes);
         const offset = str_length.len;
-        return String.new(bytes[offset..(offset + @as(usize, @intCast(str_length)))]);
+        const end: usize = @intCast(try str_length.getValue());
+        std.debug.print("end: {}", .{end});
+        if ((try str_length.getValue()) > bytes.len - offset) {
+            return error.InsufficientData;
+        }
+        return String.new(bytes[offset..(offset + end)]);
     }
 
-    // pub fn intoBytes(self: String,bytes: *Bytes) void {
-    //     self.length.intoBytes(bytes);
-    //     bytes.data.appendSlice(self.data) catch unreachable;
-    // }
+    pub fn toBytes(self: *const String) std.meta.Tuple(&.{ []const u8, []const u8 }) {
+        return .{ self.length.toBytes(), self.data };
+    }
 
+    pub fn format(
+        self: *const String,
+        comptime _: []const u8,
+        _: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        try writer.writeAll("String(\"");
+        _ = try writer.print("{s}", .{self.toBytes()[1]});
+        try writer.writeAll("\"");
+    }
     // if needed add string manipulation functions here
 };
 
@@ -384,6 +409,10 @@ test "VarInt: fromSlice" {
     var long_buffer = [_]u8{ 255, 255, 255, 255, 7, 45, 23, 66 };
     try expect(try (try VarInt.fromSlice(&long_buffer)).getValue() == 2_147_483_647);
     try expect((try VarInt.fromSlice(&long_buffer)).len == 5);
+
+    var smol = [_]u8{ 0, 255, 255, 255, 7, 45, 23, 66 };
+    try expect(try (try VarInt.fromSlice(&smol)).getValue() == 0);
+    try expect((try VarInt.fromSlice(&smol)).len == 1);
 }
 
 // test "VarLong: fromInt" {
