@@ -2,7 +2,7 @@ const std = @import("std");
 const net = std.net;
 const print = std.debug.print;
 const types = @import("net/types.zig");
-const packets = @import("net/packet.zig");
+const io = @import("net/io.zig");
 
 pub fn main() !void {
     // This code reads the first packet sent by a client
@@ -48,7 +48,7 @@ pub fn listen(server: *std.net.Server, allocator: std.mem.Allocator) !void {
     };
     // zig fmt: on
 
-    const reader = packets.PacketReader;
+    const reader = io.PacketReader;
     const TIMEOUT_DURATION = std.time.ns_per_s * 5; // Timeout of 5 seconds
 
     while (true) {
@@ -155,7 +155,7 @@ pub fn listen(server: *std.net.Server, allocator: std.mem.Allocator) !void {
                                 var string = std.ArrayList(u8).init(fba.allocator());
                                 try std.json.stringify(slp, .{}, string.writer());
                                 const mString = String.new(string.items);
-                                var writer = try packets.PacketWriter.init(&allocator);
+                                var writer = try io.PacketWriter.init(&allocator);
                                 defer writer.deinit();
                                 try writer.appendSlice(mString.toBytes()[0]);
                                 try writer.appendSlice(mString.toBytes()[1]);
@@ -166,7 +166,7 @@ pub fn listen(server: *std.net.Server, allocator: std.mem.Allocator) !void {
                             1 => {
                                 const ping = try packet.read(PingRequest);
                                 print("{} sent packet with value {any}.\n", .{ client.address, ping });
-                                var writer = try packets.PacketWriter.init(&allocator);
+                                var writer = try io.PacketWriter.init(&allocator);
                                 defer writer.deinit();
                                 try writer.write(ping.payload);
                                 try writer.setID(0x01);
