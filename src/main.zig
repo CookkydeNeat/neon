@@ -3,6 +3,9 @@ const net = std.net;
 const print = std.debug.print;
 const types = @import("net/types.zig");
 const io = @import("net/io.zig");
+const proto_handshake = @import("protocol/handshake.zig");
+const proto_status = @import("protocol/status.zig");
+const enums = @import("protocol/enums.zig");
 
 pub fn main() !void {
     // This code reads the first packet sent by a client
@@ -23,28 +26,10 @@ pub fn main() !void {
 }
 
 pub fn listen(server: *std.net.Server, allocator: std.mem.Allocator) !void {
-    const String = types.String;
-    const VarInt = types.VarInt;
     // zig fmt: off
     const StatusRequest = struct {};
     const PingRequest = struct {
         payload: i64
-    };
-
-    const State = enum(u8) {
-        Handshaking,
-        Status,
-        Login,
-        Transfer,
-        Configuration,
-        Play
-    };
-
-    const Handshaking = struct {
-        protocol_version: VarInt, 
-        server_addr: String, 
-        server_port: u16, 
-        next_state: State 
     };
     // zig fmt: on
 
@@ -60,7 +45,7 @@ pub fn listen(server: *std.net.Server, allocator: std.mem.Allocator) !void {
 
         var start_time = std.time.timestamp();
         var timed_out = false;
-        var status = State.Handshaking;
+        var status = enums.State.Handshaking;
 
         while (true) {
             // Check if the connection has timed out
@@ -105,9 +90,9 @@ pub fn listen(server: *std.net.Server, allocator: std.mem.Allocator) !void {
                     .Handshaking => {
                         switch (try header.id.getValue()) {
                             0 => {
-                                const handshake = try packet.read(Handshaking);
+                                const handshake = try packet.read(proto_handshake.Handshaking);
                                 print("{} sent packet with value {any}.\n", .{ client.address, handshake });
-                                status = State.Status;
+                                status = enums.State.Status;
                                 print("Going into Status state\n", .{});
                             },
                             else => {
@@ -120,45 +105,14 @@ pub fn listen(server: *std.net.Server, allocator: std.mem.Allocator) !void {
                             0 => {
                                 const ping = try packet.read(StatusRequest);
                                 print("{} sent packet with value {any}.\n", .{ client.address, ping });
-                                // zig fmt: off
-                                const SLP = struct { 
-                                    version: struct {
-                                        name: []const u8,
-                                        protocol: i32,
-                                    },
-                                    description: struct {
-                                        text: []const u8
-                                    },
-                                    players: struct {
-                                        max: i32,
-                                        online: i32
-                                    }
-                                };
-
-                                const slp = SLP{ 
-                                    .version = .{ 
-                                        .name = "1.21.1", 
-                                        .protocol = 767 
-                                    },
-                                    .description = .{
-                                        .text = "Hello world !"
-                                    },
-                                    .players = .{
-                                        .max = 69,
-                                        .online = 9999999
-                                    }
-                                };
-                                // zig fmt: on
-
-                                var buf: [1024]u8 = undefined;
-                                var fba = std.heap.FixedBufferAllocator.init(&buf);
-                                var string = std.ArrayList(u8).init(fba.allocator());
-                                try std.json.stringify(slp, .{}, string.writer());
-                                const mString = String.new(string.items);
+                                var arena = std.heap.ArenaAllocator.init(allocator);
+                                const response = proto_status.SLPJsonResponse.DEFAULT;
+                                const string = try response.toString(&arena.allocator());
+                                defer arena.deinit();
                                 var writer = try io.PacketWriter.init(&allocator);
                                 defer writer.deinit();
-                                try writer.appendSlice(mString.toBytes()[0]);
-                                try writer.appendSlice(mString.toBytes()[1]);
+                                const status_response = proto_status.StatusResponse{ .json_response = string };
+                                try writer.write(status_response);
                                 try writer.setID(0x00);
                                 try client.stream.writeAll(writer.getSlice());
                                 print("Sent status\n", .{});

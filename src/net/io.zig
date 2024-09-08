@@ -48,6 +48,20 @@ pub const PacketWriter = struct {
             .Int => {
                 try self.appendSlice(std.mem.asBytes(&@byteSwap(value)));
             },
+            .Struct => |struct_info| {
+                switch (@TypeOf(value)) {
+                    String => {
+                        try self.appendSlice(value.toBytes()[0]);
+                        try self.appendSlice(value.toBytes()[1]);
+                    },
+                    else => {
+                        const fields = struct_info.fields;
+                        inline for (fields) |field| {
+                            try self.write(@field(value, field.name));
+                        }
+                    },
+                }
+            },
             else => @compileError("Type " ++ @typeName(T) ++ " cannot be written !"),
         }
     }
